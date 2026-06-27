@@ -6,9 +6,115 @@ import json
 import os
 import re
 import sys
+import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any, Protocol
 
 from pypdf import PdfReader
+
+
+class EmbeddingClient(Protocol):
+    embeddings: Any
+
+
+class ChromaCollection(Protocol):
+    def add(
+        self,
+        *,
+        ids: list[str],
+        documents: list[str],
+        embeddings: list[list[float]],
+        metadatas: list[dict[str, Any]],
+    ) -> None:
+        ...
+
+
+def _batch_records(records: list[dict], batch_size: int) -> list[list[dict]]:
+    return [
+        records[start : start + batch_size]
+        for start in range(0, len(records), batch_size)
+    ]
+
+
+def _chroma_metadata(record: dict[str, Any]) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    for key, value in record.items():
+        if key in {"chunk_id", "text"} or value is None:
+            continue
+        if isinstance(value, str | int | float | bool):
+            metadata[key] = value
+        else:
+            metadata[key] = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return metadata
+
+
+def _is_rate_limit_error(error: Exception) -> bool:
+    status_code = getattr(error, "status_code", None)
+    code = getattr(error, "code", None)
+    error_type = error.__class__.__name__
+    message = str(error).lower()
+    return (
+        status_code == 429
+        or code == "rate_limit_exceeded"
+        or error_type == "RateLimitError"
+        or "rate limit" in message
+    )
+
+
+def _retry_after_seconds(error: Exception) -> float | None:
+    response = getattr(error, "response", None)
+    headers = getattr(response, "headers", {}) or {}
+
+    retry_after_ms = headers.get("retry-after-ms")
+    if retry_after_ms is not None:
+        try:
+            return float(retry_after_ms) / 1000
+        except ValueError:
+            pass
+
+    retry_after = headers.get("retry-after")
+    if retry_after is not None:
+        try:
+            return float(retry_after)
+        except ValueError:
+            pass
+
+    message = str(error)
+    match = re.search(r"try again in\s+(\d+(?:\.\d+)?)\s*ms", message, re.I)
+    if match:
+        return float(match.group(1)) / 1000
+
+    match = re.search(r"try again in\s+(\d+(?:\.\d+)?)\s*s", message, re.I)
+    if match:
+        return float(match.group(1))
+
+    return None
+
+
+def _embedding_response_with_retries(
+    *,
+    embedding_client: EmbeddingClient,
+    model: str,
+    documents: list[str],
+    max_retries: int,
+    retry_min_seconds: float,
+    retry_max_seconds: float,
+    sleep_fn: Callable[[float], None],
+) -> Any:
+    attempt = 0
+    while True:
+        try:
+            return embedding_client.embeddings.create(model=model, input=documents)
+        except Exception as exc:
+            if not _is_rate_limit_error(exc) or attempt >= max_retries:
+                raise
+
+            delay = _retry_after_seconds(exc)
+            if delay is None:
+                delay = retry_min_seconds * (2**attempt)
+            sleep_fn(min(max(delay, 0), retry_max_seconds))
+            attempt += 1
 
 
 def read_jsonl(path: Path) -> list[dict]:
@@ -64,6 +170,62 @@ def build_page_record(
         "source_path": source_path,
         "doc_type": "pdf",
     }
+
+
+def ingest_chunks_to_chroma(
+    *,
+    chunks_path: Path,
+    embedding_client: EmbeddingClient,
+    collection: ChromaCollection,
+    model: str,
+    batch_size: int = 100,
+    max_retries: int = 8,
+    retry_min_seconds: float = 1.0,
+    retry_max_seconds: float = 60.0,
+    sleep_fn: Callable[[float], None] = time.sleep,
+) -> int:
+    if batch_size <= 0:
+        raise ValueError("batch_size must be greater than zero.")
+    if max_retries < 0:
+        raise ValueError("max_retries must be zero or greater.")
+    if retry_min_seconds < 0:
+        raise ValueError("retry_min_seconds must be zero or greater.")
+    if retry_max_seconds < 0:
+        raise ValueError("retry_max_seconds must be zero or greater.")
+
+    records = read_jsonl(chunks_path)
+    if not records:
+        return 0
+
+    inserted_count = 0
+    for batch in _batch_records(records, batch_size):
+        ids = [str(record["chunk_id"]) for record in batch]
+        documents = [str(record.get("text") or "") for record in batch]
+        metadatas = [_chroma_metadata(record) for record in batch]
+
+        response = _embedding_response_with_retries(
+            embedding_client=embedding_client,
+            model=model,
+            documents=documents,
+            max_retries=max_retries,
+            retry_min_seconds=retry_min_seconds,
+            retry_max_seconds=retry_max_seconds,
+            sleep_fn=sleep_fn,
+        )
+        embeddings = [item.embedding for item in response.data]
+        if len(embeddings) != len(documents):
+            raise ValueError(
+                "Embedding response count does not match the number of input chunks."
+            )
+        collection.add(
+            ids=ids,
+            documents=documents,
+            embeddings=embeddings,
+            metadatas=metadatas,
+        )
+        inserted_count += len(batch)
+
+    return inserted_count
 
 
 def extract_pdf_pages(task: dict) -> tuple[str, list[str], int]:

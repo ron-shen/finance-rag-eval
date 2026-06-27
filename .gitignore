@@ -136,6 +136,9 @@ celerybeat.pid
 *.aof
 *.pid
 
+# Generated vector databases
+data/vector/
+
 # RabbitMQ
 mnesia/
 rabbitmq/

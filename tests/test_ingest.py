@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -31,6 +32,267 @@ def test_read_jsonl_reports_invalid_line_number(tmp_path: Path) -> None:
         ingest.read_jsonl(path)
 
     assert str(exc_info.value) == f"Invalid JSON on {path}:2"
+
+
+def test_ingest_chunks_to_chroma_embeds_jsonl_chunks_and_persists_vectors(
+    tmp_path: Path,
+) -> None:
+    chunks_path = tmp_path / "token-chunk.jsonl"
+    chunk_records = [
+        {
+            "doc_name": "ACME_2022_10K",
+            "company": "Acme Corp",
+            "period": 2022,
+            "page": 4,
+            "text": "Revenue increased during the year.",
+            "source_path": "pdfs/ACME_2022_10K.pdf",
+            "doc_type": "pdf",
+            "chunk_index": 0,
+            "chunk_id": "chunk-a",
+            "chunking_strategy": "token",
+        },
+        {
+            "doc_name": "ACME_2022_10K",
+            "company": "Acme Corp",
+            "period": 2022,
+            "page": 4,
+            "text": "Operating margin expanded.",
+            "source_path": "pdfs/ACME_2022_10K.pdf",
+            "doc_type": "pdf",
+            "chunk_index": 1,
+            "chunk_id": "chunk-b",
+            "chunking_strategy": "token",
+        },
+    ]
+    write_jsonl(chunks_path, chunk_records)
+
+    class FakeEmbeddingClient:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+            self.embeddings = self
+
+        def create(self, *, model: str, input: list[str]) -> SimpleNamespace:
+            self.calls.append({"model": model, "input": input})
+            return SimpleNamespace(
+                data=[
+                    SimpleNamespace(embedding=[0.1, 0.2, 0.3]),
+                    SimpleNamespace(embedding=[0.4, 0.5, 0.6]),
+                ]
+            )
+
+    class FakeChromaCollection:
+        def __init__(self) -> None:
+            self.add_calls: list[dict] = []
+
+        def add(
+            self,
+            *,
+            ids: list[str],
+            documents: list[str],
+            embeddings: list[list[float]],
+            metadatas: list[dict],
+        ) -> None:
+            self.add_calls.append(
+                {
+                    "ids": ids,
+                    "documents": documents,
+                    "embeddings": embeddings,
+                    "metadatas": metadatas,
+                }
+            )
+
+    embedding_client = FakeEmbeddingClient()
+    collection = FakeChromaCollection()
+
+    inserted_count = ingest.ingest_chunks_to_chroma(
+        chunks_path=chunks_path,
+        embedding_client=embedding_client,
+        collection=collection,
+        model="text-embedding-3-small",
+    )
+
+    assert inserted_count == 2
+    assert embedding_client.calls == [
+        {
+            "model": "text-embedding-3-small",
+            "input": [
+                "Revenue increased during the year.",
+                "Operating margin expanded.",
+            ],
+        }
+    ]
+    assert collection.add_calls == [
+        {
+            "ids": ["chunk-a", "chunk-b"],
+            "documents": [
+                "Revenue increased during the year.",
+                "Operating margin expanded.",
+            ],
+            "embeddings": [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]],
+            "metadatas": [
+                {
+                    "doc_name": "ACME_2022_10K",
+                    "company": "Acme Corp",
+                    "period": 2022,
+                    "page": 4,
+                    "source_path": "pdfs/ACME_2022_10K.pdf",
+                    "doc_type": "pdf",
+                    "chunk_index": 0,
+                    "chunking_strategy": "token",
+                },
+                {
+                    "doc_name": "ACME_2022_10K",
+                    "company": "Acme Corp",
+                    "period": 2022,
+                    "page": 4,
+                    "source_path": "pdfs/ACME_2022_10K.pdf",
+                    "doc_type": "pdf",
+                    "chunk_index": 1,
+                    "chunking_strategy": "token",
+                },
+            ],
+        }
+    ]
+
+
+def test_ingest_chunks_to_chroma_batches_embedding_requests(tmp_path: Path) -> None:
+    chunks_path = tmp_path / "token-chunk.jsonl"
+    write_jsonl(
+        chunks_path,
+        [
+            {"chunk_id": "chunk-a", "text": "first"},
+            {"chunk_id": "chunk-b", "text": "second"},
+            {"chunk_id": "chunk-c", "text": "third"},
+        ],
+    )
+
+    class FakeEmbeddingClient:
+        def __init__(self) -> None:
+            self.calls: list[list[str]] = []
+            self.embeddings = self
+
+        def create(self, *, model: str, input: list[str]) -> SimpleNamespace:
+            self.calls.append(input)
+            return SimpleNamespace(
+                data=[
+                    SimpleNamespace(embedding=[float(len(self.calls))])
+                    for _ in input
+                ]
+            )
+
+    class FakeChromaCollection:
+        def __init__(self) -> None:
+            self.add_calls: list[list[str]] = []
+
+        def add(
+            self,
+            *,
+            ids: list[str],
+            documents: list[str],
+            embeddings: list[list[float]],
+            metadatas: list[dict],
+        ) -> None:
+            self.add_calls.append(ids)
+
+    embedding_client = FakeEmbeddingClient()
+    collection = FakeChromaCollection()
+
+    inserted_count = ingest.ingest_chunks_to_chroma(
+        chunks_path=chunks_path,
+        embedding_client=embedding_client,
+        collection=collection,
+        model="text-embedding-3-small",
+        batch_size=2,
+    )
+
+    assert inserted_count == 3
+    assert embedding_client.calls == [["first", "second"], ["third"]]
+    assert collection.add_calls == [["chunk-a", "chunk-b"], ["chunk-c"]]
+
+
+def test_ingest_chunks_to_chroma_retries_rate_limited_batch_after_sleep(
+    tmp_path: Path,
+) -> None:
+    chunks_path = tmp_path / "token-chunk.jsonl"
+    write_jsonl(
+        chunks_path,
+        [
+            {"chunk_id": "chunk-a", "text": "first"},
+            {"chunk_id": "chunk-b", "text": "second"},
+        ],
+    )
+
+    class RateLimitError(Exception):
+        status_code = 429
+
+    class FakeEmbeddingClient:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+            self.embeddings = self
+
+        def create(self, *, model: str, input: list[str]) -> SimpleNamespace:
+            self.calls.append({"model": model, "input": list(input)})
+            if len(self.calls) == 1:
+                raise RateLimitError("Please try again in 20ms.")
+            return SimpleNamespace(
+                data=[
+                    SimpleNamespace(embedding=[0.1]),
+                    SimpleNamespace(embedding=[0.2]),
+                ]
+            )
+
+    class FakeChromaCollection:
+        def __init__(self) -> None:
+            self.add_calls: list[dict] = []
+
+        def add(
+            self,
+            *,
+            ids: list[str],
+            documents: list[str],
+            embeddings: list[list[float]],
+            metadatas: list[dict],
+        ) -> None:
+            self.add_calls.append(
+                {
+                    "ids": ids,
+                    "documents": documents,
+                    "embeddings": embeddings,
+                    "metadatas": metadatas,
+                }
+            )
+
+    sleep_calls: list[float] = []
+
+    def fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
+    embedding_client = FakeEmbeddingClient()
+    collection = FakeChromaCollection()
+
+    inserted_count = ingest.ingest_chunks_to_chroma(
+        chunks_path=chunks_path,
+        embedding_client=embedding_client,
+        collection=collection,
+        model="text-embedding-3-small",
+        batch_size=2,
+        sleep_fn=fake_sleep,
+    )
+
+    assert inserted_count == 2
+    assert embedding_client.calls == [
+        {"model": "text-embedding-3-small", "input": ["first", "second"]},
+        {"model": "text-embedding-3-small", "input": ["first", "second"]},
+    ]
+    assert sleep_calls == [0.02]
+    assert collection.add_calls == [
+        {
+            "ids": ["chunk-a", "chunk-b"],
+            "documents": ["first", "second"],
+            "embeddings": [[0.1], [0.2]],
+            "metadatas": [{}, {}],
+        }
+    ]
 
 
 @pytest.mark.parametrize(
