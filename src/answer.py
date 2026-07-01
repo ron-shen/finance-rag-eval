@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol
@@ -80,12 +81,15 @@ def write_answers_jsonl(
                         f"{retrieval.get('question')}"
                     )
                 output_record = dict(retrieval)
+                answer_start = time.perf_counter()
                 generation = generator(retrieval, model=model)
+                answer_latency_ms = (time.perf_counter() - answer_start) * 1000
                 _validate_generation(generation)
 
                 output_record["generated_answer"] = generation["answer"]
                 output_record["citations"] = generation["citations"]
                 output_record["answer_model"] = model
+                output_record["answer_latency_ms"] = answer_latency_ms
                 output_file.write(json.dumps(output_record, ensure_ascii=False) + "\n")
         tmp_output_path.replace(output_path)
     except Exception:

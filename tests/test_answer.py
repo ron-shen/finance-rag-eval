@@ -134,7 +134,14 @@ def test_write_answers_jsonl_generates_answers_with_citations_and_preserves_meta
     assert generator_calls == [
         {"retrieval": retrieval_record, "model": "gpt-4.1-mini"}
     ]
-    assert read_jsonl(output_path) == [
+    output_rows = read_jsonl(output_path)
+    answer_latency_ms = output_rows[0].pop("answer_latency_ms")
+    assert (
+        isinstance(answer_latency_ms, (int, float))
+        and not isinstance(answer_latency_ms, bool)
+        and answer_latency_ms >= 0
+    )
+    assert output_rows == [
         {
             **retrieval_record,
             "generated_answer": (
