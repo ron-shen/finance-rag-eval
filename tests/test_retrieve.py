@@ -22,6 +22,97 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
     ]
 
 
+def test_infer_chroma_metadata_filter_resolves_exact_doc_from_chunk_catalog() -> None:
+    retrieve = importlib.import_module("src.retrieve")
+    chunks = [
+        {
+            "doc_name": "3M_2018_10K",
+            "company": "3M",
+            "period": 2018,
+            "page": 1,
+            "text": "2018 revenue discussion.",
+        },
+        {
+            "doc_name": "3M_2018_10K",
+            "company": "3M",
+            "period": 2018,
+            "page": 2,
+            "text": "More 2018 filing text.",
+        },
+        {
+            "doc_name": "3M_2019_10K",
+            "company": "3M",
+            "period": 2019,
+            "page": 1,
+            "text": "2019 revenue discussion.",
+        },
+    ]
+
+    catalog = retrieve.build_document_catalog(chunks)
+
+    assert retrieve.infer_chroma_metadata_filter(
+        "What is the revenue of 3M in 2018?",
+        catalog,
+    ) == {"doc_name": "3M_2018_10K"}
+
+
+def test_infer_chroma_metadata_filter_falls_back_to_company_period_filter() -> None:
+    retrieve = importlib.import_module("src.retrieve")
+    chunks = [
+        {
+            "doc_name": "3M_2018_annual_report",
+            "company": "3M",
+            "period": 2018,
+            "page": 1,
+            "text": "2018 annual report text.",
+        },
+        {
+            "doc_name": "3M_2018Q4_EARNINGS",
+            "company": "3M",
+            "period": 2018,
+            "page": 1,
+            "text": "2018 earnings text.",
+        },
+        {
+            "doc_name": "3M_2019_10K",
+            "company": "3M",
+            "period": 2019,
+            "page": 1,
+            "text": "2019 filing text.",
+        },
+    ]
+
+    catalog = retrieve.build_document_catalog(chunks)
+
+    assert retrieve.infer_chroma_metadata_filter(
+        "What is the revenue of 3M in 2018?",
+        catalog,
+    ) == {"$and": [{"company": "3M"}, {"period": 2018}]}
+
+
+def test_infer_chroma_metadata_filter_returns_none_without_metadata_match() -> None:
+    retrieve = importlib.import_module("src.retrieve")
+    chunks = [
+        {
+            "doc_name": "3M_2018_10K",
+            "company": "3M",
+            "period": 2018,
+            "page": 1,
+            "text": "2018 filing text.",
+        },
+    ]
+
+    catalog = retrieve.build_document_catalog(chunks)
+
+    assert (
+        retrieve.infer_chroma_metadata_filter(
+            "What was the capital expenditure amount?",
+            catalog,
+        )
+        is None
+    )
+
+
 def test_write_retrievals_jsonl_ranks_top_k_chunks_and_preserves_question_metadata(
     tmp_path: Path,
 ) -> None:
@@ -111,3 +202,84 @@ def test_write_retrievals_jsonl_ranks_top_k_chunks_and_preserves_question_metada
             ],
         }
     ]
+
+
+def test_write_chroma_retrievals_jsonl_infers_metadata_filter_from_catalog(
+    tmp_path: Path,
+) -> None:
+    retrieve = importlib.import_module("src.retrieve")
+    questions_path = tmp_path / "questions.jsonl"
+    output_path = tmp_path / "retrievals.jsonl"
+    chunks = [
+        {
+            "doc_name": "3M_2018_10K",
+            "company": "3M",
+            "period": 2018,
+            "page": 42,
+            "text": "3M 2018 revenue discussion.",
+        },
+        {
+            "doc_name": "3M_2019_10K",
+            "company": "3M",
+            "period": 2019,
+            "page": 43,
+            "text": "3M 2019 revenue discussion.",
+        },
+    ]
+    question = {
+        "financebench_id": "financebench_id_3m_revenue_2018",
+        "question": "What is the revenue of 3M in 2018?",
+    }
+
+    class FakeEmbeddingDatum:
+        embedding = [0.1, 0.2, 0.3]
+
+    class FakeEmbeddingResponse:
+        data = [FakeEmbeddingDatum()]
+
+    class FakeEmbeddingClient:
+        def __init__(self) -> None:
+            self.embeddings = self
+
+        def create(self, *, model: str, input: list[str]) -> FakeEmbeddingResponse:
+            assert model == "text-embedding-3-small"
+            assert input == [question["question"]]
+            return FakeEmbeddingResponse()
+
+    class FakeCollection:
+        def __init__(self) -> None:
+            self.where_calls: list[dict[str, Any] | None] = []
+
+        def query(
+            self,
+            *,
+            query_embeddings: list[list[float]],
+            n_results: int,
+            include: list[str],
+            where: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            assert query_embeddings == [[0.1, 0.2, 0.3]]
+            assert n_results == 1
+            assert include == ["documents", "metadatas", "distances"]
+            self.where_calls.append(where)
+            return {
+                "documents": [["3M reported 2018 revenue."]],
+                "metadatas": [[{"doc_name": "3M_2018_10K", "page": 42}]],
+                "distances": [[0.0]],
+            }
+
+    collection = FakeCollection()
+    write_jsonl(questions_path, [question])
+
+    written_count = retrieve.write_chroma_retrievals_jsonl(
+        questions_path=questions_path,
+        output_path=output_path,
+        collection=collection,
+        embedding_client=FakeEmbeddingClient(),
+        model="text-embedding-3-small",
+        top_k=1,
+        document_catalog=retrieve.build_document_catalog(chunks),
+    )
+
+    assert written_count == 1
+    assert collection.where_calls == [{"doc_name": "3M_2018_10K"}]
