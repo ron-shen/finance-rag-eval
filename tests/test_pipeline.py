@@ -127,3 +127,26 @@ def test_build_pipeline_plan_derives_stable_parameter_sensitive_run_id(
     assert first["run_dir"] == tmp_path / "data" / "runs" / first["run_id"]
     assert different_chunking["run_id"] != first["run_id"]
     assert different_retrieval["run_id"] != first["run_id"]
+
+
+def test_build_pipeline_plan_can_enable_inferred_metadata_filter(
+    tmp_path: Path,
+) -> None:
+    from src import pipeline
+
+    plan = pipeline.build_pipeline_plan(
+        project_root=tmp_path,
+        strategy="token",
+        chunk_size=128,
+        chunk_overlap=32,
+        top_k=5,
+        infer_metadata_filter=True,
+    )
+
+    retrieve_command = _stages_by_name(plan)["retrieve"]["command"]
+
+    assert "--infer-metadata-filter" in retrieve_command
+    assert _command_arg(retrieve_command, "--metadata-filter-chunks") == str(
+        plan["paths"]["chunks"]
+    )
+    assert plan["run_id"].endswith("-infer-filter")

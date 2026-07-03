@@ -320,6 +320,11 @@ def _identity_record(record: dict[str, Any]) -> dict[str, Any]:
 
 
 def _ragas_sample(record: dict[str, Any], top_k: int) -> dict[str, Any]:
+    ground_truth = _text_value(record.get("answer"))
+    justification = _text_value(record.get("justification"))
+    if justification:
+        ground_truth = f"Answer: {ground_truth}\nJustification: {justification}"
+
     return {
         "question": _text_value(record.get("question")),
         "answer": _text_value(record.get("generated_answer")),
@@ -327,7 +332,7 @@ def _ragas_sample(record: dict[str, Any], top_k: int) -> dict[str, Any]:
             _text_value(chunk.get("text"))
             for chunk in _top_chunks(record, top_k)
         ],
-        "ground_truth": _text_value(record.get("answer")),
+        "ground_truth": ground_truth,
     }
 
 

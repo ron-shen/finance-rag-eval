@@ -47,6 +47,44 @@ def ragas_metric_subset(record: dict[str, Any]) -> dict[str, Any]:
     return {key: record[key] for key in RAGAS_METRIC_KEYS}
 
 
+def test_ragas_sample_uses_financebench_answer_and_justification_as_ground_truth() -> None:
+    evaluate = importlib.import_module("src.evaluate")
+    record = {
+        "question": "What is the FY2018 capital expenditure amount for 3M?",
+        "answer": "$1577.00",
+        "justification": (
+            "The metric capital expenditures was directly extracted from "
+            "the company 10K."
+        ),
+        "generated_answer": "3M's FY2018 capital expenditure was $1.577 billion.",
+        "retrieved_chunks": [
+            {
+                "doc_name": "3M_2018_10K",
+                "page": 59,
+                "text": "Purchases of property, plant and equipment were 1,577.",
+            },
+            {
+                "doc_name": "3M_2018_10K",
+                "page": 57,
+                "text": "Property, plant and equipment net was 8,738.",
+            },
+        ],
+    }
+
+    sample = evaluate._ragas_sample(record, top_k=1)
+
+    assert sample == {
+        "question": "What is the FY2018 capital expenditure amount for 3M?",
+        "answer": "3M's FY2018 capital expenditure was $1.577 billion.",
+        "contexts": ["Purchases of property, plant and equipment were 1,577."],
+        "ground_truth": (
+            "Answer: $1577.00\n"
+            "Justification: The metric capital expenditures was directly "
+            "extracted from the company 10K."
+        ),
+    }
+
+
 def test_write_metrics_jsonl_uses_injected_ragas_evaluator_and_preserves_rows(
     tmp_path: Path,
 ) -> None:

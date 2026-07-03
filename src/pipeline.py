@@ -25,6 +25,7 @@ def _run_id(
     ragas_llm_model: str | None = None,
     ragas_embedding_model: str | None = None,
     filter_doc_name: bool = False,
+    infer_metadata_filter: bool = False,
 ) -> str:
     normalized_strategy = strategy.strip().lower().replace("_", "-")
     parts = [
@@ -40,6 +41,8 @@ def _run_id(
         parts.append(f"ragas-embed-{_slug(ragas_embedding_model)}")
     if filter_doc_name:
         parts.append("filter-doc")
+    if infer_metadata_filter:
+        parts.append("infer-filter")
     return "-".join(parts)
 
 
@@ -76,6 +79,7 @@ def build_pipeline_plan(
     ragas_llm_model: str | None = None,
     ragas_embedding_model: str | None = None,
     filter_doc_name: bool = False,
+    infer_metadata_filter: bool = False,
     openai_timeout: float | None = None,
     openai_max_retries: int | None = None,
 ) -> dict[str, Any]:
@@ -89,6 +93,7 @@ def build_pipeline_plan(
         ragas_llm_model=ragas_llm_model,
         ragas_embedding_model=ragas_embedding_model,
         filter_doc_name=filter_doc_name,
+        infer_metadata_filter=infer_metadata_filter,
     )
     run_dir = project_root / "data" / "runs" / run_id
     paths = {
@@ -133,6 +138,12 @@ def build_pipeline_plan(
         str(top_k),
     ]
     _add_flag(retrieve_command, "--filter-doc-name", filter_doc_name)
+    _add_flag(retrieve_command, "--infer-metadata-filter", infer_metadata_filter)
+    _add_option(
+        retrieve_command,
+        "--metadata-filter-chunks",
+        paths["chunks"] if infer_metadata_filter else None,
+    )
 
     evaluate_command = [
         sys.executable,
@@ -285,6 +296,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Restrict retrieval to chunks from each question's doc_name.",
     )
     parser.add_argument(
+        "--infer-metadata-filter",
+        action="store_true",
+        help=(
+            "Infer company/year Chroma metadata filters from question text "
+            "using the run's chunk metadata."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print the stage commands without running them.",
@@ -309,6 +328,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ragas_llm_model=args.ragas_llm_model,
         ragas_embedding_model=args.ragas_embedding_model,
         filter_doc_name=args.filter_doc_name,
+        infer_metadata_filter=args.infer_metadata_filter,
         openai_timeout=args.openai_timeout,
         openai_max_retries=args.openai_max_retries,
     )
