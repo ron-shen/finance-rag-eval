@@ -124,11 +124,6 @@ conda run -n rag-eval-env python -m pytest
 
 The tests focus on core behavior: JSONL validation, PDF page extraction task building, deterministic chunk IDs, chunking strategies, embedding retry logic, Chroma retrieval filters, answer validation, pipeline planning, and Ragas evaluator wiring.
 
-## Resume Bullets
-
-- Built an end-to-end FinanceBench RAG evaluation pipeline in Python, extracting 84 FinanceBench-referenced filings from a 368-PDF local corpus into 12,013 page-level records, indexing them in Chroma with OpenAI embeddings, and generating cited answers for 150 benchmark questions.
-- Improved RAG quality by tuning chunking strategy, chunk size, overlap, top-k retrieval, metadata filtering, embedding model, and answer model settings, then comparing runs with Ragas metrics and retrieval hit-rate analysis.
-- Implemented metadata-aware retrieval, deterministic chunk IDs, retry-safe embedding ingestion, structured cited answer generation, and focused pytest coverage for ingestion, chunking, retrieval, evaluation, and pipeline orchestration.
 
 ## Notes
 
